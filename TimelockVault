@@ -1,0 +1,53 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+contract TimelockVault {
+    // Inlined nonReentrant guard
+    error ReentrantCall();
+    uint256 private _entered;
+    modifier nonReentrant() {
+        if (_entered == 1) revert ReentrantCall();
+        _entered = 1;
+        _;
+        _entered = 0;
+    }
+
+    error ZeroAddress();
+    error ZeroAmount();
+    error NotReady(uint256 releaseTime, uint256 nowTime);
+    error NothingToWithdraw();
+
+    struct Lock {
+        uint128 amount;
+        uint64  releaseTime;
+        bool    withdrawn;
+    }
+
+    mapping(address => Lock[]) public locks;
+
+    event Locked(address indexed funder, address indexed beneficiary, uint256 amount, uint64 releaseTime, uint256 index);
+    event Withdrawn(address indexed beneficiary, uint256 index, uint256 amount);
+
+    function lock(address beneficiary, uint64 releaseTime) external payable {
+        if (beneficiary == address(0)) revert ZeroAddress();
+        if (msg.value == 0) revert ZeroAmount();
+        locks[beneficiary].push(Lock({amount: uint128(msg.value), releaseTime: releaseTime, withdrawn: false}));
+        emit Locked(msg.sender, beneficiary, msg.value, releaseTime, locks[beneficiary].length - 1);
+    }
+
+    function withdraw(uint256 index) external nonReentrant {
+        Lock storage L = locks[msg.sender][index];
+        if (L.withdrawn || L.amount == 0) revert NothingToWithdraw();
+        if (block.timestamp < L.releaseTime) revert NotReady(L.releaseTime, block.timestamp);
+        L.withdrawn = true;
+        uint256 amount = L.amount;
+        L.amount = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "ETH transfer failed");
+        emit Withdrawn(msg.sender, index, amount);
+    }
+
+    function lockCount(address beneficiary) external view returns (uint256) {
+        return locks[beneficiary].length;
+    }
+}
