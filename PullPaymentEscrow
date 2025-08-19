@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+contract PullPaymentEscrow {
+    // Inlined nonReentrant guard
+    error ReentrantCall();
+    uint256 private _entered;
+    modifier nonReentrant() {
+        if (_entered == 1) revert ReentrantCall();
+        _entered = 1;
+        _;
+        _entered = 0;
+    }
+
+    error ZeroAddress();
+    error ZeroAmount();
+    error NothingToWithdraw();
+
+    event Deposited(address indexed payer, address indexed payee, uint256 amount);
+    event Withdrawn(address indexed payee, uint256 amount);
+
+    mapping(address => uint256) public deposits;
+
+    receive() external payable { revert("Use deposit(payee)"); }
+
+    function deposit(address payee) external payable {
+        if (payee == address(0)) revert ZeroAddress();
+        if (msg.value == 0) revert ZeroAmount();
+        deposits[payee] += msg.value;
+        emit Deposited(msg.sender, payee, msg.value);
+    }
+
+    function withdraw() external nonReentrant {
+        uint256 amount = deposits[msg.sender];
+        if (amount == 0) revert NothingToWithdraw();
+        deposits[msg.sender] = 0;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "ETH transfer failed");
+        emit Withdrawn(msg.sender, amount);
+    }
+}
