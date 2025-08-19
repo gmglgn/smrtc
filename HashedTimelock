@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+contract HashedTimelock {
+    // Inlined nonReentrant guard
+    error ReentrantCall();
+    uint256 private _entered;
+    modifier nonReentrant() {
+        if (_entered == 1) revert ReentrantCall();
+        _entered = 1;
+        _;
+        _entered = 0;
+    }
+
+    error Exists();
+    error NotSender();
+    error NotReceiver();
+    error NotExpired();
+    error AlreadySettled();
+    error WrongPreimage();
+
+    event Locked(bytes32 indexed id, address indexed sender, address indexed receiver, uint256 value, bytes32 hashlock, uint64 timelock);
+    event Withdrawn(bytes32 indexed id, bytes preimage);
+    event Refunded(bytes32 indexed id);
+
+    struct Lock {
+        address sender;
+        address receiver;
+        uint256 value;
+        bytes32 hashlock;   // keccak256(preimage)
+        uint64 timelock;    // unix time when refund becomes possible
+        bool withdrawn;
+        bool refunded;
+    }
+
+    mapping(bytes32 => Lock) public locks;
+
+    receive() external payable { revert("Use lock()"); }
+
+    /// @notice Create a new HTLC position. Choose any unique `id`.
+    function lock(bytes32 id, address receiver, bytes32 hashlock, uint64 timelock) external payable {
+        if (locks[id].sender != address(0)) revert Exists();
+        locks[id] = Lock({
+            sender: msg.sender,
+            receiver: receiver,
+            value: msg.value,
+            hashlock: hashlock,
+            timelock: timelock,
+            withdrawn: false,
+            refunded: false
+        });
+        emit Locked(id, msg.sender, receiver, msg.value, hashlock, timelock);
+    }
+
+    /// @notice Receiver withdraws by revealing the preimage that hashes to `hashlock`.
+    function withdraw(bytes32 id, bytes calldata preimage) external nonReentrant {
+        Lock storage L = locks[id];
+        if (msg.sender != L.receiver) revert NotReceiver();
+        if (L.withdrawn || L.refunded) revert AlreadySettled();
+        if (keccak256(preimage) != L.hashlock) revert WrongPreimage();
+        L.withdrawn = true;
+        (bool ok, ) = L.receiver.call{value: L.value}("");
+        require(ok, "ETH transfer failed");
+        emit Withdrawn(id, preimage);
+    }
+
+    /// @notice Sender refunds after `timelock` if still unclaimed.
+    function refund(bytes32 id) external nonReentrant {
+        Lock storage L = locks[id];
+        if (msg.sender != L.sender) revert NotSender();
+        if (L.withdrawn || L.refunded) revert AlreadySettled();
+        if (block.timestamp < L.timelock) revert NotExpired();
+        L.refunded = true;
+        (bool ok, ) = L.sender.call{value: L.value}("");
+        require(ok, "ETH transfer failed");
+        emit Refunded(id);
+    }
+}
